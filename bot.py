@@ -23,6 +23,7 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 SUBSCRIPTION_STARS = int(os.environ.get("SUBSCRIPTION_STARS", "250"))
 SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "@HeavenlyStoriesBot").strip()
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "/data/heavenly_stories.db")
+CONTENT_PATH = Path(os.environ.get("CONTENT_PATH", "/app/stories/catalog.json"))
 API = f"https://api.telegram.org/bot{TOKEN}"
 MONTH_SECONDS = 2_592_000
 SUBSCRIPTION_PAYLOAD = "heavenly_stories_monthly_v1"
@@ -40,6 +41,11 @@ TERMS = (
     "продлевается через Telegram Stars до отмены. Цифровые материалы предназначены "
     "для личного прослушивания. По вопросам оплаты и возврата обратитесь через "
     "/paysupport. Оплачивая подписку, вы соглашаетесь с этими условиями."
+)
+
+DESCRIPTION = (
+    "Добрые христианские аудиосказки для детей: о Божьей любви, смелости, "
+    "доброте, прощении и надежде. Одна история доступна бесплатно."
 )
 
 logging.basicConfig(
@@ -64,9 +70,12 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS stories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
-                file_id TEXT NOT NULL,
+                file_id TEXT NOT NULL DEFAULT '',
                 media_type TEXT NOT NULL CHECK(media_type IN ('audio', 'voice')),
                 is_free INTEGER NOT NULL DEFAULT 0,
+                body TEXT NOT NULL DEFAULT '',
+                slug TEXT UNIQUE,
+                scripture TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -78,6 +87,17 @@ def init_db() -> None:
             );
             """
         )
+        if CONTENT_PATH.exists():
+            catalog = json.loads(CONTENT_PATH.read_text(encoding="utf-8"))
+            for position, story in enumerate(catalog, start=1):
+                conn.execute(
+                    "INSERT OR IGNORE INTO stories(title, file_id, media_type, is_free, body, slug, scripture, created_at) "
+                    "VALUES(?, '', 'audio', ?, ?, ?, ?, ?)",
+                    (
+                        story["title"], int(story.get("is_free", False)), story["body"],
+                        story["slug"], story.get("scripture", ""), int(time.time()) + position,
+                    ),
+                )
         conn.commit()
 
 
@@ -125,8 +145,23 @@ def is_subscribed(user_id: int) -> bool:
 
 
 def send_story(chat_id: int, row: sqlite3.Row) -> None:
-    method = "sendAudio" if row["media_type"] == "audio" else "sendVoice"
-    api(method, {"chat_id": chat_id, row["media_type"]: row["file_id"], "caption": row["title"]})
+    if row["file_id"]:
+        method = "sendAudio" if row["media_type"] == "audio" else "sendVoice"
+        api(method, {"chat_id": chat_id, row["media_type"]: row["file_id"], "caption": row["title"]})
+        return
+    heading = f"✨ {row['title']}"
+    if row["scripture"]:
+        heading += f"\n{row['scripture']}"
+    send_message(chat_id, heading)
+    body = row["body"]
+    while body:
+        if len(body) <= 3900:
+            chunk, body = body, ""
+        else:
+            split = body.rfind("\n\n", 0, 3900)
+            split = split if split > 0 else 3900
+            chunk, body = body[:split], body[split:].lstrip()
+        send_message(chat_id, chunk)
 
 
 def show_free(chat_id: int) -> None:
@@ -221,6 +256,13 @@ def handle_message(message: dict[str, Any]) -> None:
         send_message(chat_id, WELCOME, main_keyboard())
     elif text == "/terms":
         send_message(chat_id, TERMS)
+    elif text == "/privacy":
+        send_message(
+            chat_id,
+            "Бот хранит ваш Telegram ID, срок подписки и идентификатор платежа, "
+            "чтобы предоставлять доступ и обрабатывать возвраты. Бот не запрашивает "
+            "имя, адрес или данные банковской карты. Платёж обрабатывает Telegram.",
+        )
     elif text in {"/support", "/paysupport"}:
         send_message(
             chat_id,
@@ -286,6 +328,8 @@ def handle_update(update: dict[str, Any]) -> None:
 
 
 def set_commands() -> None:
+    api("setMyDescription", {"description": DESCRIPTION})
+    api("setMyShortDescription", {"short_description": "Христианские аудиосказки для детей ✨"})
     api(
         "setMyCommands",
         {
@@ -293,6 +337,7 @@ def set_commands() -> None:
                 {"command": "start", "description": "Открыть главное меню"},
                 {"command": "status", "description": "Проверить подписку"},
                 {"command": "terms", "description": "Условия использования"},
+                {"command": "privacy", "description": "Конфиденциальность"},
                 {"command": "support", "description": "Помощь"},
                 {"command": "paysupport", "description": "Помощь с оплатой"},
             ]
