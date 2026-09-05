@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 COPY bot.py /app/bot.py
+COPY stories /app/stories
 RUN mkdir -p /data
 
 VOLUME ["/data"]
